@@ -1,0 +1,11 @@
+# runtime output
+captures/
+*.log
+raw.bin
+summary.json
+
+# python
+__pycache__/
+*.pyc
+venv/
+.venv/
