@@ -1,4 +1,4 @@
-# himax_preview
+# Camera_preview_on_We2
 
 A local **Python** live-preview tool for the **Seeed Grove Vision AI Module V2** (Himax WiseEye2 / WE2).
 It talks to the board's factory **SenseCraft / SSCMA** firmware over USB serial, decodes the JPEG
