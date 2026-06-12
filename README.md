@@ -18,6 +18,57 @@ Inference runs on a downscaled frame internally, but the firmware re-scales the 
 back to the returned image resolution, so overlays align at any resolution with no extra scaling.
 Full reverse-engineering notes (commands, framing, schema) are in [`PROTOCOL_NOTES.md`](PROTOCOL_NOTES.md).
 
+## Use as a module (for other projects)
+
+The reusable logic lives in **`himax_vision.py`**; `himax_preview.py` is just an example CLI on
+top of it. Import `HimaxVision` from your own project:
+
+```python
+from himax_vision import HimaxVision
+
+with HimaxVision(port="/dev/ttyACM0", resolution=640, show_preview=True,
+                 collect_inference=True, save_log=True, log_path="run.log",
+                 rotate=180, tscore=60) as cam:
+    print(cam.model)                 # {'name': 'Gesture Detection', 'classes': ['paper','rock','scissors'], ...}
+    for frame in cam.stream():       # one Frame per inference event
+        for d in frame.detections:   # list[Detection]
+            print(d.label, d.score, d.box, d.keypoints)   # e.g. "scissors 74 (cx,cy,w,h) None"
+        if frame.image is not None:  # BGR numpy array (preview image), or None
+            ...
+```
+
+For a **pose / keypoint model** (e.g. Hand Pose), each detection carries `kind == "pose"` and a
+`keypoints` list of `(x, y, score, kp_id)` tuples (plus the hand `box`):
+
+```python
+from himax_vision import HimaxVision
+
+with HimaxVision(port="/dev/ttyACM0", resolution=640, collect_inference=True,
+                 tscore=40, rotate=180) as cam:
+    for frame in cam.stream():
+        for d in frame.detections:
+            if d.kind == "pose":
+                cx, cy, w, h = d.box                 # hand bounding box (center-based)
+                print("hand", d.score, "at", (cx, cy), "->", len(d.keypoints), "keypoints")
+                for x, y, score, kp_id in d.keypoints:
+                    print(f"  kp{kp_id}: ({x},{y}) {score}")
+            else:                                    # kind == "box" (object detection)
+                print(d.label, d.score, d.box)
+```
+
+> The same code handles both model types: object detectors fill `kind="box"` (no keypoints),
+> pose models fill `kind="pose"` (box + keypoints). Set `show_preview=True` (or `annotate=True`
+> with `return_image=True`) to also get the drawn skeleton/box on `frame.image`.
+
+**Inputs** (constructor): `port`, `resolution` (240/480/640), `show_preview` (open a window),
+`collect_inference` (parse results), `save_log` + `log_path`. Extras: `rotate`, `tscore`,
+`sample` (raw camera), `return_image` (get `Frame.image` without a window), `annotate`.
+
+**Outputs**: `cam.model` (dict), and per `Frame`: `.image` (preview, BGR or `None`),
+`.detections` (`list[Detection]` with `kind`/`label`/`score`/`box` center-based/`keypoints`),
+`.resolution`, `.perf`, `.raw`. The window's `q` key (or `cam.stop()` / leaving the `with`) ends
+the stream. Runtime-only — the module never flashes.
+
 ## Requirements
 
 - Linux (developed on an Orange Pi / arm64), Python 3.8+
@@ -27,6 +78,9 @@ Full reverse-engineering notes (commands, framing, schema) are in [`PROTOCOL_NOT
 ```bash
 pip install --user pyserial opencv-python numpy
 ```
+
+> If your system `python3` doesn't have the deps (e.g. it's an older 3.10 while you installed
+> them under 3.12), run the tool with the matching interpreter, e.g. `python3.12 himax_preview.py`.
 
 ## Quick start
 
@@ -56,7 +110,7 @@ Press **`q`** in the preview window to quit.
 | `--sample` | Pure camera stream (`AT+SAMPLE`, no model/inference) |
 | `--tscore 0-100` | Confidence threshold. **Board default 83 is very high and hides most detections — use ~40.** |
 | `--draw-pose` | Overlay hand-pose detections (box + 21 keypoints + skeleton) |
-| `--draw-inference` | Overlay object-detection boxes (`data.boxes`) |
+| `--draw-inference` | Overlay object-detection boxes (`data.boxes`). Class labels (e.g. `rock`/`paper`/`scissors`) are auto-fetched from the model via `AT+INFO?` |
 | `--rotate {0,90,180,270}` | Rotate preview clockwise (use `180` if upside-down) |
 | `--frames N` | Capture N frames then stop (`0` = unlimited) |
 | `--duration S` | Stop after S seconds |
@@ -90,8 +144,10 @@ Writes `captures/frame_NNN.png` (annotated), `frame_NNN.jpg` (raw), and `summary
 
 ## Notes
 
+- Detection boxes are `data.boxes = [ [cx,cy,w,h,score,target], ... ]` — **center-based** (cx,cy = box center).
 - The keypoint schema is `data.keypoints = [ [cx,cy,w,h,score,target], [ [x,y,score,id] × 21 ] ]`
-  (bbox is **center-based**; 21 MediaPipe-style hand landmarks).
+  (bbox also center-based; 21 MediaPipe-style hand landmarks).
+- Class names for box labels are read from the model metadata via `AT+INFO?` automatically.
 - Resolution options come from `AT+SENSORS?`; set with `AT+SENSOR=<id>,<enable>,<opt_id>`. The
   resolution must be set immediately before the stream command or it reverts.
 
