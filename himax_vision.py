@@ -49,8 +49,9 @@ log.addHandler(logging.NullHandler())  # library: silent unless the user enables
 # ---- SSCMA protocol constants (reverse-engineered; see PROTOCOL_NOTES.md) ----
 DEFAULT_PORT = "/dev/ttyACM0"
 DEFAULT_BAUD = 921600
-INVOKE_CMD = b"AT+INVOKE=-1,0,0\r"   # continuous inference-with-image stream
-SAMPLE_CMD = b"AT+SAMPLE=-1\r"       # continuous raw-camera stream (no model)
+INVOKE_CMD = b"AT+INVOKE=-1,0,0\r"        # inference stream WITH image (result_only=0)
+INVOKE_NOIMG_CMD = b"AT+INVOKE=-1,0,1\r"  # inference stream, results ONLY (result_only=1)
+SAMPLE_CMD = b"AT+SAMPLE=-1\r"            # continuous raw-camera stream (no model)
 STOP_CMD = b"AT+BREAK\r"             # stop the stream loop (runtime-only, never writes flash)
 SENSOR_ID = 1
 RES_OPT = {240: 0, 480: 1, 640: 2}   # pixels -> sensor opt_id (640 = 640x480, the max)
@@ -282,8 +283,15 @@ class HimaxVision:
         # resolution MUST be set immediately before the stream command or it reverts
         if self.resolution:
             self._set_sensor(self.resolution)
-        self._send(SAMPLE_CMD if self.sample else INVOKE_CMD,
-                   "START(%s)" % ("SAMPLE" if self.sample else "INVOKE"))
+        # If no image is needed (no preview / no return_image), ask the board NOT to send the
+        # JPEG at all (result_only=1) — saves UART bandwidth and lifts the frame rate.
+        if self.sample:
+            start, label = SAMPLE_CMD, "SAMPLE"
+        elif self.want_image:
+            start, label = INVOKE_CMD, "INVOKE+image"
+        else:
+            start, label = INVOKE_NOIMG_CMD, "INVOKE results-only"
+        self._send(start, "START(%s)" % label)
         if not self.sample and self.tscore is not None:
             time.sleep(0.8)
             self._send(b"AT+TSCORE=%d\r" % self.tscore, "TSCORE(%d)" % self.tscore)
