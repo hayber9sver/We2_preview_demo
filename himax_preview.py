@@ -47,6 +47,11 @@ def build_parser():
                    help="overlay hand-pose box + keypoints + skeleton")
     p.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270],
                    help="rotate preview clockwise (use 180 if upside-down)")
+    p.add_argument("--at-rotate", type=int, default=None, choices=[0, 1, 2, 3],
+                   help="send AT+ROTATE=N before streaming - firmware-side, "
+                        "rotates only the AI's input (0/1/2/3 = 0/90/180/270deg); "
+                        "the preview image itself is unaffected (use --rotate for that). "
+                        "Custom sscma_cam_mic command, not stock SSCMA.")
     p.add_argument("--frames", type=int, default=0, help="stop after N frames (0=unlimited)")
     p.add_argument("--duration", type=float, default=0.0, help="stop after S seconds")
     p.add_argument("--no-window", action="store_true",
@@ -99,6 +104,7 @@ def main():
         return_image=bool(args.save_dir),          # need the image to save it headless
         save_log=True,
         log_path=LOG_PATH,
+        pre_commands=([b"AT+ROTATE=%d\r" % args.at_rotate] if args.at_rotate is not None else None),
     )
     # honor --log-level on the module's logger (also echo to stderr)
     lvl = getattr(logging, args.log_level.upper(), logging.INFO)

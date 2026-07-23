@@ -32,7 +32,7 @@ Example:
         print(cam.model)                       # {'name': 'Gesture Detection', 'classes': [...]}
         for frame in cam.stream():
             for d in frame.detections:
-                print(d.label, d.score, d.box)  # e.g. "scissors 74 (cx,cy,w,h)"
+                print(d.label, d.score, d.box)  # e.g. "scissors 74 (x,y,w,h), top-left corner"
 """
 
 import base64
@@ -71,12 +71,21 @@ HAND_EDGES = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
 # ============================================================ data types ====================
 @dataclass
 class Detection:
-    """One model detection. `box` is CENTER-based (cx, cy, w, h) in the image's resolution."""
+    """One model detection. `box` is TOP-LEFT-based (x, y, w, h) in the image's resolution.
+
+    2026-07-24: was documented (and drawn) as CENTER-based (cx, cy) - true for
+    the stock SenseCraft/SSCMA firmware this module was originally written
+    against, but this custom sscma_cam_mic firmware's cvapp.cpp explicitly
+    reports the top-left corner instead (see its run_yolo_detect() comment:
+    "b.x/b.y are already the top-left corner ... no center-to-corner
+    subtraction here"). Fixed here and in _render()/format_detections() to
+    match what this firmware actually sends.
+    """
     kind: str                                  # "box" (object detection) | "pose" (keypoints)
     class_id: int
     label: str                                 # class name if known, else str(class_id)
     score: float
-    box: Tuple[float, float, float, float]     # cx, cy, w, h
+    box: Tuple[float, float, float, float]     # x, y, w, h (top-left corner)
     keypoints: Optional[List[Tuple]] = None    # [(x, y, score, kp_id), ...] for pose models
 
 
@@ -150,8 +159,8 @@ def format_detections(detections: List[Detection]) -> str:
     """Compact one-line summary of detections (for logging)."""
     parts = []
     for d in detections:
-        cx, cy, w, h = d.box
-        s = "%s %s box=[%g,%g,%g,%g]" % (d.label, d.score, cx, cy, w, h)
+        x, y, w, h = d.box
+        s = "%s %s box=[%g,%g,%g,%g]" % (d.label, d.score, x, y, w, h)
         if d.keypoints is not None:
             s += " keypoints=%d" % len(d.keypoints)
         parts.append(s)
@@ -163,7 +172,8 @@ class HimaxVision:
     def __init__(self, port=DEFAULT_PORT, resolution=None, show_preview=False,
                  collect_inference=True, save_log=False, log_path=None,
                  rotate=0, tscore=None, sample=False, baud=DEFAULT_BAUD,
-                 return_image=None, annotate=None, window_name="Himax Vision"):
+                 return_image=None, annotate=None, window_name="Himax Vision",
+                 pre_commands=None):
         self.port = port
         self.resolution = resolution
         self.show_preview = show_preview
@@ -175,6 +185,11 @@ class HimaxVision:
         self.sample = sample
         self.baud = baud
         self.window_name = window_name
+        # raw AT command bytes (e.g. b"AT+ROTATE=1\r") sent once, while idle,
+        # right after the sensor resolution is set and before the stream
+        # starts - see open(). Firmware-specific extension (this custom
+        # sscma_cam_mic build), not part of the stock SSCMA protocol.
+        self.pre_commands = pre_commands
         # produce Frame.image when showing a window, or when explicitly requested
         self.return_image = bool(show_preview if return_image is None else return_image)
         self.want_image = self.show_preview or self.return_image
@@ -274,7 +289,18 @@ class HimaxVision:
     def open(self):
         """Open the port, read the model, set resolution, and start the stream."""
         import serial
-        self._ser = serial.Serial(self.port, self.baud, timeout=0.2)
+        # 2026-07-24: plain serial.Serial(port, baud) toggles DTR/RTS on open,
+        # which resets this board (documented board behavior: "serial-open
+        # reboots the board"). Construct unopened, force dtr/rts low, then
+        # open - avoids the reset instead of racing _fetch_model()'s retry
+        # budget against a reboot that may or may not have just happened.
+        self._ser = serial.Serial()
+        self._ser.port = self.port
+        self._ser.baudrate = self.baud
+        self._ser.timeout = 0.2
+        self._ser.dtr = False
+        self._ser.rts = False
+        self._ser.open()
         log.info("opened %s @ %d", self.port, self.baud)
         self._fetch_model()
         self._send(STOP_CMD, "STOP(pre-clean)")
@@ -283,6 +309,10 @@ class HimaxVision:
         # resolution MUST be set immediately before the stream command or it reverts
         if self.resolution:
             self._set_sensor(self.resolution)
+        for cmd in (self.pre_commands or []):
+            self._send(cmd, "PRECMD")
+            time.sleep(0.1)
+            self._ser.reset_input_buffer()
         # If no image is needed (no preview / no return_image), ask the board NOT to send the
         # JPEG at all (result_only=1) — saves UART bandwidth and lifts the frame rate.
         if self.sample:
@@ -344,9 +374,9 @@ class HimaxVision:
         ow, oh = frame.shape[1], frame.shape[0]
         labels = []
         for d in detections:
-            cx, cy, w, h = d.box
-            x1, y1 = int(round(cx - w / 2.0)), int(round(cy - h / 2.0))
-            x2, y2 = int(round(cx + w / 2.0)), int(round(cy + h / 2.0))
+            x, y, w, h = d.box
+            x1, y1 = int(round(x)), int(round(y))
+            x2, y2 = int(round(x + w)), int(round(y + h))
             color = PALETTE[d.class_id % len(PALETTE)]
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             labels.append(("%s %s" % (d.label, d.score), x1, y1, color))
